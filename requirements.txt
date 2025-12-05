@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+motor
+pydantic
+numpy
+joblib
+pillow
+google-generativeai
+python-multipart
+scikit-learn
+pandas
