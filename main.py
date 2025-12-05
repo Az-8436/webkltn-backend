@@ -18,6 +18,8 @@ from sklearn.linear_model import LinearRegression
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
+import os
+
 
 
 # --- CẤU HÌNH MONGODB ---
@@ -111,7 +113,7 @@ class PredictionInput(BaseModel):
 
 @app.get("/")
 def home():
-    return {"message": "Hello World"}
+    return {"message": "Backend Running"}
 
 @app.post("/ocr")
 async def upload_image(file: UploadFile = File(...)):
@@ -760,4 +762,6 @@ async def predict_glucose(req: PredictionRequest):
         "message": f"Đã dự báo xu hướng cho 7 ngày tới."
     }
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
