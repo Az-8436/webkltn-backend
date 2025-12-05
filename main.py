@@ -20,6 +20,13 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Cấu hình API key của Gemini
+
+
 
 
 # --- CẤU HÌNH MONGODB ---
@@ -374,7 +381,8 @@ async def get_dashboard_stats():
     }
 
 
-genai.configure(api_key="AIzaSyAP6qMiFWkrUNIL60CSG9spSl4TnmkDAXA")
+my_api_key = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=my_api_key)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 

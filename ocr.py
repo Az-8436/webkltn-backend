@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Cấu hình API key của Gemini
-# genai.configure(api_key="AIzaSyBVCXIaCG6lErfoCD9ybXI8fIio-QhBacU")
+
 my_api_key = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=my_api_key)
 
