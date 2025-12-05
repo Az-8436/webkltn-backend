@@ -2,9 +2,15 @@ import google.generativeai as genai
 from PIL import Image
 import io
 import json
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Cấu hình API key của Gemini
-genai.configure(api_key="AIzaSyBVCXIaCG6lErfoCD9ybXI8fIio-QhBacU")
+# genai.configure(api_key="AIzaSyBVCXIaCG6lErfoCD9ybXI8fIio-QhBacU")
+my_api_key = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=my_api_key)
 
 prompt = """
 Bạn là một chuyên gia xử lý dữ liệu y tế. Nhiệm vụ của bạn là phân tích hình ảnh phiếu kết quả xét nghiệm được cung cấp và trích xuất các thông tin cụ thể sau.
