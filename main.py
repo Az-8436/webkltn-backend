@@ -773,3 +773,361 @@ if __name__ == "__main__":
     # uvicorn.run(app, host="0.0.0.0", port=8000)
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import UploadFile, File
+from ocr import extract_info_from_image
+from pydantic import BaseModel
+import pickle
+import json
+import joblib
+import numpy as np
+from models.Neural_Network import forward_prop
+from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
+from datetime import datetime, timedelta
+from typing import Optional
+import google.generativeai as genai
+from sklearn.linear_model import LinearRegression
+import pandas as pd
+import numpy as np
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# === MONGO ===
+MONGO_DETAILS = "mongodb+srv://ngothimyha271:ngothimyha271@updatedata.f1pphvr.mongodb.net/?appName=updatedata"
+client = AsyncIOMotorClient(MONGO_DETAILS)
+
+db = client.medical_db
+collection = db.patient_records
+collection_glucose = db.glucose_records
+
+# === FASTAPI APP ===
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# === MODELS ===
+class GlucoseRecord(BaseModel):
+    value: int
+    measure_type: str
+    note: str = ""
+    created_at: str = ""
+
+class ChatRequest(BaseModel):
+    question: str
+    glucose_value: int
+    measure_type: str
+
+class PatientInfo(BaseModel):
+    name: str
+    gender: str
+    age: int
+    height: int
+    weight: int
+    systolicBloodPressure: int
+    diastolicBloodPressure: int
+    heartRate: int
+    bmi: float
+
+class BloodTests(BaseModel):
+    cholesterol: float
+    hdl: float
+    ldl: float
+    triglycerid: float
+    creatinin: float
+    hba1c: float
+    ure: float
+    vldl: float
+
+class SaveRecordInput(BaseModel):
+    patient_info: dict
+    blood_tests: dict
+    ai_diagnosis: str
+    doctor_diagnosis: str
+    created_at: Optional[str] = None
+
+def record_helper(record) -> dict:
+    return {
+        "id": str(record["_id"]),
+        "patient_info": record.get("patient_info", {}),
+        "blood_tests": record.get("blood_tests", {}),
+        "ai_diagnosis": record.get("ai_diagnosis", ""),
+        "doctor_diagnosis": record.get("doctor_diagnosis", ""),
+        "created_at": record.get("created_at", "")
+    }
+
+
+# === ROUTES ===
+
+@app.get("/")
+def home():
+    return {"message": "Backend Running"}
+
+@app.post("/ocr")
+async def upload_image(file: UploadFile = File(...)):
+    try:
+        image_bytes = await file.read()
+        result = extract_info_from_image(image_bytes)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ==== Predict Disease ====
+@app.post("/predict-disease")
+async def predict(data):
+    info = data.patient_info
+    tests = data.blood_tests
+
+    # gender convert
+    if info.gender in "Nữ":
+        info.gender = 0
+    elif info.gender in "Nam":
+        info.gender = 1
+    else:
+        info.gender = None
+
+    data_for_model_dia = np.array(
+        [[info.gender, info.age, tests.ure, tests.creatinin, tests.hba1c,
+          tests.cholesterol, tests.triglycerid, tests.hdl, tests.ldl,
+          tests.vldl, info.bmi]]
+    )
+
+    scaler_dia = joblib.load('scaler_cua_be.pkl')
+    normalized_data_dia = scaler_dia.transform(data_for_model_dia).T
+
+    with open('weights_bias_diabetes_with_batch_gradient_descent.pkl', 'rb') as f:
+        params_dia = pickle.load(f)
+
+    W1_d = params_dia['W1']
+    b1_d = params_dia['b1']
+    W2_d = params_dia['W2']
+    b2_d = params_dia['b2']
+    W3_d = params_dia['W3']
+    b3_d = params_dia['b3']
+
+    _, _, _, _, _, A3_d = forward_prop(normalized_data_dia, W1_d, b1_d, W2_d, b2_d, W3_d, b3_d)
+    pre_d = np.argmax(A3_d, 0)
+
+    if pre_d[0] == 0:
+        result_d = "Bệnh nhân không bị tiểu đường"
+    elif pre_d[0] == 1:
+        result_d = "Bệnh nhân có nguy cơ tiền tiểu đường"
+    else:
+        result_d = "Bệnh nhân bị tiểu đường không phụ thuộc insulin (type 2)"
+
+    # hypertension part
+    data_for_model_hyper = np.array(
+        [[info.gender, info.age, info.height, info.weight,
+          info.systolicBloodPressure, info.diastolicBloodPressure,
+          info.heartRate, info.bmi]]
+    )
+
+    scaler_hyper = joblib.load('scaler_cua_hypertension.pkl')
+    normalized_data_hyper = scaler_hyper.transform(data_for_model_hyper).T
+
+    with open('weights_bias_hypertension_0.97.pkl', 'rb') as f:
+        params_h = pickle.load(f)
+
+    W1_h = params_h['W1']
+    b1_h = params_h['b1']
+    W2_h = params_h['W2']
+    b2_h = params_h['b2']
+    W3_h = params_h['W3']
+    b3_h = params_h['b3']
+
+    _, _, _, _, _, A3_h = forward_prop(normalized_data_hyper, W1_h, b1_h, W2_h, b2_h, W3_h, b3_h)
+    pre_h = np.argmax(A3_h, 0)
+
+    if pre_h[0] == 0:
+        result_h = "Bệnh nhân không bị tăng huyết áp"
+    elif pre_h[0] == 1:
+        result_h = "Bệnh nhân có nguy cơ tiền tăng huyết áp"
+    elif pre_h[0] == 2:
+        result_h = "Bệnh nhân bị tăng huyết áp cấp độ 1"
+    else:
+        result_h = "Bệnh nhân bị tăng huyết áp cấp độ 2"
+
+    combined_result = f"{result_d} và {result_h}"
+
+    return {"status": "success", "data": combined_result}
+
+
+# === SAVE RECORD ===
+@app.post("/api/save-record")
+async def save_record(data: SaveRecordInput):
+    record_dict = data.dict()
+
+    if not record_dict.get("created_at"):
+        record_dict["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    new_record = await collection.insert_one(record_dict)
+    return {"status": "success", "id": str(new_record.inserted_id)}
+
+
+# === GET RECORDS ===
+@app.get("/api/get-records")
+async def get_records():
+    records = []
+    async for record in collection.find().sort("_id", -1):
+        records.append(record_helper(record))
+    return {"status": "success", "data": records}
+
+
+# === DASHBOARD ===
+@app.get("/api/dashboard")
+async def get_dashboard_stats():
+    total_patients = 0
+    diabetes_count = 0
+    hypertension_count = 0
+    chart_data_dict = {}
+
+    async for record in collection.find():
+        total_patients += 1
+        diagnosis = record.get("ai_diagnosis", "").lower()
+        created_at = record.get("created_at", "")
+        date_str = created_at.split(" ")[0] if created_at else "N/A"
+
+        is_diabetes = "tiểu đường" in diagnosis or "tieu duong" in diagnosis
+        is_hypertension = "huyết áp" in diagnosis or "huyet ap" in diagnosis
+
+        if "không bị tiểu đường" not in diagnosis:
+            if is_diabetes:
+                diabetes_count += 1
+
+        if "không bị tăng huyết áp" not in diagnosis:
+            if is_hypertension:
+                hypertension_count += 1
+
+        if date_str not in chart_data_dict:
+            chart_data_dict[date_str] = {
+                "name": date_str,
+                "diabetes": 0,
+                "hypertension": 0,
+                "total": 0
+            }
+
+        chart_data_dict[date_str]["total"] += 1
+
+        if is_diabetes:
+            chart_data_dict[date_str]["diabetes"] += 1
+        if is_hypertension:
+            chart_data_dict[date_str]["hypertension"] += 1
+
+    chart_list = sorted(list(chart_data_dict.values()), key=lambda x: x['name'])
+
+    return {
+        "status": "success",
+        "summary": {
+            "total": total_patients,
+            "diabetes": diabetes_count,
+            "hypertension": hypertension_count
+        },
+        "chart_data": chart_list
+    }
+
+
+# === GEMINI ===
+my_api_key = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=my_api_key)
+model = genai.GenerativeModel('gemini-2.5-flash')
+
+
+# === CHATBOT ===
+@app.post("/api/chat/advice")
+async def get_diet_advice(req: ChatRequest):
+    try:
+        context = ""
+        if req.glucose_value > 0:
+            type_text = "lúc đói" if req.measure_type == "fasting" else "sau ăn 2 giờ"
+            context = f"Tôi có đường huyết {req.glucose_value} mg/dL đo {type_text}. "
+
+        prompt = f"{context}Câu hỏi: '{req.question}'. Hãy trả lời thân thiện và ngắn gọn."
+
+        response = model.generate_content(prompt)
+        return {"reply": response.text}
+    except:
+        return {"reply": "AI đang bận, thử lại sau nhé!"}
+
+
+# === GLUCOSE SAVE ===
+@app.post("/api/glucose/add")
+async def add_glucose(record: GlucoseRecord):
+    if not record.created_at:
+        record.created_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+    await collection_glucose.insert_one(record.dict())
+    return {"status": "success"}
+
+@app.get("/api/glucose/history")
+async def get_glucose_history():
+    cursor = collection_glucose.find({}, {"_id": 0}).sort("_id", -1).limit(20)
+    history = await cursor.to_list(length=20)
+    return {"data": history[::-1]}
+
+
+# === GLUCOSE PREDICT 7 DAYS ===
+@app.post("/api/predict/glucose")
+async def predict_glucose(req):
+    cursor = collection_glucose.find({"measure_type": req.measure_type})
+    records = await cursor.to_list(length=100)
+
+    if len(records) < 3:
+        return {"can_predict": False, "message": "Cần ít nhất 3 lần đo để dự báo!"}
+
+    df = pd.DataFrame(records)
+    df['date_obj'] = pd.to_datetime(df['created_at'], dayfirst=True, format='mixed')
+    df = df.sort_values(by='date_obj')
+
+    start_time = df['date_obj'].iloc[0].timestamp()
+    df['timestamp'] = df['date_obj'].map(pd.Timestamp.timestamp)
+    df['days_passed'] = (df['timestamp'] - start_time) / (24*3600)
+
+    X = df[['days_passed']].values
+    y = df['value'].values
+
+    model_lr = LinearRegression()
+    model_lr.fit(X, y)
+
+    predictions = []
+    now = datetime.now()
+    last_value = df['value'].iloc[-1]
+
+    for i in range(1, 8):
+        next_day = now + timedelta(days=i)
+        next_ts = next_day.timestamp()
+        days_passed = (next_ts - start_time) / (24*3600)
+
+        pred = int(model_lr.predict([[days_passed]])[0])
+
+        if pred < 50:
+            pred = last_value
+        if pred > 600:
+            pred = 600
+
+        predictions.append({
+            "date": next_day.strftime("%d/%m"),
+            "value": pred
+        })
+
+    return {
+        "can_predict": True,
+        "predictions": predictions
+    }
+
+
+# === FIX FOR RENDER (QUAN TRỌNG) ===
+def start():
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
+if __name__ == "__main__":
+    start()
