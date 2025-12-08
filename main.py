@@ -88,7 +88,8 @@ class BloodTests(BaseModel):
 # Định nghĩa khuôn dữ liệu để lưu vào MongoDB
 class SaveRecordInput(BaseModel):
     patient_info: dict       # Thông tin bệnh nhân
-    blood_tests: dict        # Chỉ số xét nghiệm
+    blood_tests: dict
+    units: dict        # Chỉ số xét nghiệm
     ai_diagnosis: str        # Kết luận của AI
     doctor_diagnosis: str    # Kết luận của Bác sĩ (Mới thêm)
     created_at: Optional[str] = None
