@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, UploadFile, File, Form
 from ocr import extract_info_from_image
@@ -18,21 +18,23 @@ from sklearn.linear_model import LinearRegression
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
+from sklearn.linear_model import LinearRegression
 import os
-
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Cấu hình API key của Gemini
-
-
-
-
+my_api_key = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=my_api_key)
+model = genai.GenerativeModel('gemini-2.5-flash-lite')
 # --- CẤU HÌNH MONGODB ---
 # Kết nối đến MongoDB (mặc định là cổng 27017)
 MONGO_DETAILS = "mongodb+srv://ngothimyha271:ngothimyha271@updatedata.f1pphvr.mongodb.net/?appName=updatedata" 
 client = AsyncIOMotorClient(MONGO_DETAILS)
+
+
+# genai.configure(api_key="")
+# model = genai.GenerativeModel('gemini-2.5-flash')
 
 # Tạo database tên là "medical_db"
 db = client.medical_db 
@@ -49,12 +51,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- MODEL DỮ LIỆU ---
-class GlucoseRecord(BaseModel):
-    value: int
-    measure_type: str
-    note: str = ""
-    created_at: str = ""
+
 
 class ChatRequest(BaseModel):
     question: str
@@ -62,6 +59,7 @@ class ChatRequest(BaseModel):
     measure_type: str
 
 class PatientInfo(BaseModel):
+    id: str
     name: str
     gender: str
     age: int
@@ -88,8 +86,8 @@ class BloodTests(BaseModel):
 # Định nghĩa khuôn dữ liệu để lưu vào MongoDB
 class SaveRecordInput(BaseModel):
     patient_info: dict       # Thông tin bệnh nhân
-    blood_tests: dict
-    units: dict        # Chỉ số xét nghiệm
+    blood_tests: dict        # Chỉ số xét nghiệm
+    units: dict
     ai_diagnosis: str        # Kết luận của AI
     doctor_diagnosis: str    # Kết luận của Bác sĩ (Mới thêm)
     created_at: Optional[str] = None
@@ -121,7 +119,7 @@ class PredictionInput(BaseModel):
 
 @app.get("/")
 def home():
-    return {"message": "Backend Running"}
+    return {"message": "Hello World"}
 
 @app.post("/ocr")
 async def upload_image(file: UploadFile = File(...)):
@@ -382,24 +380,64 @@ async def get_dashboard_stats():
     }
 
 
-my_api_key = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=my_api_key)
-model = genai.GenerativeModel('gemini-2.5-flash')
+
 
 
 
 # --- API LƯU TRỮ ---
+# @app.post("/api/glucose/add")
+# async def add_glucose(record: GlucoseRecord):
+#     if not record.created_at:
+#         record.created_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+#     await collection_glucose.insert_one(record.dict())
+#     return {"status": "success"}
+# --- MODEL DỮ LIỆU ---
+class GlucoseRecord(BaseModel):
+    patient_id: str
+    value: int
+    measure_type: str
+    note: str = ""
+    created_at: str = ""
+
 @app.post("/api/glucose/add")
 async def add_glucose(record: GlucoseRecord):
+    # 1. Tự động lấy giờ nếu thiếu
     if not record.created_at:
         record.created_at = datetime.now().strftime("%d/%m/%Y %H:%M")
-    await collection_glucose.insert_one(record.dict())
-    return {"status": "success"}
+    
+    # 2. Tìm bệnh nhân theo mã hồ sơ (record.patient_id) 
+    # và PUSH (nhét) dữ liệu mới vào mảng "glucose_history"
+    result = await collection.update_one(
+        {"patient_info.id": record.patient_id}, # Tìm người có mã này
+        {"$push": {"glucose_history": record.dict()}} # Thêm vào danh sách
+    )
+
+    # Kiểm tra xem có tìm thấy người để lưu không
+    if result.matched_count == 0:
+         raise HTTPException(status_code=404, detail="Không tìm thấy hồ sơ bệnh nhân này!")
+
+    return {"status": "success", "message": "Đã lưu vào hồ sơ bệnh nhân"}
+
+# @app.get("/api/glucose/history")
+# async def get_glucose_history():
+#     cursor = collection_glucose.find({}, {"_id": 0}).sort("_id", -1).limit(20)
+#     history = await cursor.to_list(length=20)
+#     return {"data": history[::-1]}
 
 @app.get("/api/glucose/history")
-async def get_glucose_history():
-    cursor = collection_glucose.find({}, {"_id": 0}).sort("_id", -1).limit(20)
-    history = await cursor.to_list(length=20)
+async def get_glucose_history(patient_id: str):
+    # 1. Tìm bệnh nhân và chỉ lấy trường glucose_history thôi cho nhẹ
+    patient = await collection.find_one(
+        {"patient_info.id": patient_id}, 
+        {"glucose_history": 1, "_id": 0}
+    )
+
+    # 2. Nếu không tìm thấy bệnh nhân hoặc chưa có lịch sử đo nào
+    if not patient or "glucose_history" not in patient:
+        return {"data": []}
+
+    # 3. Lấy dữ liệu và đảo ngược lại (Mới nhất lên đầu)
+    history = patient["glucose_history"]
     return {"data": history[::-1]}
 
 # --- API CHATBOT TƯ VẤN ---
@@ -414,7 +452,7 @@ async def get_diet_advice(req: ChatRequest):
         
         prompt = (f"{context}Câu hỏi: '{req.question}'. "
                   f"Hãy trả lời ngắn gọn, thân thiện như bác sĩ gia đình. "
-                  f"Đưa ra lời khuyên ăn uống cụ thể cho chỉ số đường huyết này.")
+                  f"Đưa ra lời khuyên ăn uống hoặc thực đơn cụ thể cho chỉ số đường huyết này.")
         
         response = model.generate_content(prompt)
         return {"reply": response.text}
@@ -423,41 +461,35 @@ async def get_diet_advice(req: ChatRequest):
         return {"reply": "Hệ thống AI đang bận, bạn thử lại sau nhé!"}
     
 
+
 # --- API DỰ BÁO ĐƯỜNG HUYẾT ---
+# class PredictionRequest(BaseModel):
+#     measure_type: str # Chỉ dự báo dựa trên cùng loại (VD: Chỉ dùng lịch sử 'lúc đói' để dự báo 'lúc đói')
 class PredictionRequest(BaseModel):
-    measure_type: str # Chỉ dự báo dựa trên cùng loại (VD: Chỉ dùng lịch sử 'lúc đói' để dự báo 'lúc đói')
-
+    measure_type: str 
+    patient_id: str  # <--- Quan trọng: Phải có dòng này
 # @app.post("/api/predict/glucose")
 # async def predict_glucose(req: PredictionRequest):
-#     # 1. Lấy dữ liệu từ MongoDB (Lấy hết lịch sử của loại đo đó)
+#     # 1. Lấy dữ liệu (Giữ nguyên code cũ của bé)
 #     cursor = collection_glucose.find({"measure_type": req.measure_type})
 #     records = await cursor.to_list(length=100)
     
-#     # Nếu dữ liệu quá ít (dưới 3 lần đo) thì không dự báo được
 #     if len(records) < 3:
 #         return {
 #             "can_predict": False, 
 #             "message": "Cần ít nhất 3 lần đo trong lịch sử để dự báo!"
 #         }
 
-# # 2. Xử lý dữ liệu
+#     # 2. Xử lý dữ liệu (Giữ nguyên logic chuẩn hóa thời gian của bé)
 #     df = pd.DataFrame(records)
-    
-#     # Chuyển đổi ngày tháng
 #     df['date_obj'] = pd.to_datetime(df['created_at'], dayfirst=True, format='mixed')
-    
-#     # ⚠️ QUAN TRỌNG: Sắp xếp dữ liệu theo thời gian (Cũ trước -> Mới sau)
 #     df = df.sort_values(by='date_obj')
-#     print(df)
 
-#     # Chuyển thành Timestamp
+#     # Mốc thời gian bắt đầu
+#     start_time = df['date_obj'].iloc[0].timestamp()
+    
+#     # Tính X (đầu vào) và y (kết quả)
 #     df['timestamp'] = df['date_obj'].map(pd.Timestamp.timestamp)
-    
-#     # --- BƯỚC CHUẨN HÓA DỮ LIỆU ---
-#     # Lấy mốc thời gian đầu tiên làm gốc (Ngày thứ 0)
-#     start_time = df['timestamp'].iloc[0] 
-    
-#     # Tính số ngày trôi qua (Ngày 0, 0.5, 1, 2...)
 #     df['days_passed'] = (df['timestamp'] - start_time) / (24 * 3600)
     
 #     X = df[['days_passed']].values
@@ -467,313 +499,153 @@ class PredictionRequest(BaseModel):
 #     model = LinearRegression()
 #     model.fit(X, y)
 
-#     # future_predictions = []
-#     # current_time = datetime.now()
-#     # for i in range (1, 8):
-#     # 4. Dự báo cho ngày mai
-#         # next_date = current_time + timedelta(days=i)
-#     tomorrow_timestamp = datetime.now().timestamp() + (24 * 60 * 60)
-    
-#     # Chuẩn hóa ngày mai theo mốc bắt đầu luôn
-#     tomorrow_days_passed = (tomorrow_timestamp - start_time) / (24 * 3600)
-    
-#     predicted_value = model.predict([[tomorrow_days_passed]])
-#     result = int(predicted_value[0])
+#     # --- 4. DỰ BÁO 7 NGÀY (PHẦN MỚI SỬA) ---
+#     predictions = []
+#     current_date = datetime.now()
+#     last_real_value = df['value'].iloc[-1] # Lấy giá trị thật cuối cùng để tham chiếu
 
-#     # --- 5. LOGIC CHẶN SỐ ÂM (QUAN TRỌNG) ---
-#     # Nếu kết quả ra Âm hoặc quá thấp (< 50), chứng tỏ xu hướng giảm quá mạnh
-#     # Ta sẽ lấy trung bình của 3 lần đo gần nhất thay thế, hoặc gán bằng 70 (mức tối thiểu an toàn)
-#     if result < 50:
-#         # Cách xử lý thông minh: Nếu dự báo âm, ta giả định đường huyết sẽ giữ ổn định như lần đo cuối
-#         result = int(df['value'].iloc[-1]) 
-    
-#     # Nếu cao quá mức sống (trên 600) thì chặn lại
-#     if result > 600:
-#         result = 600
-#     print(result)
-#         # Làm tròn kết quả
-#         # result = int(predicted_value[0])
-#         # future_predictions.append({
-#         #     "date": next_date.strftime("%d/%m"), # Chỉ lấy Ngày/Tháng (VD: 05/12)
-#         #     "value": result
-#         # })
-
-#     return {
-#         "can_predict": True,
-#         "predictions": result,
-#         "message": f"Dựa trên xu hướng cũ, dự báo đường huyết ngày mai khoảng {result} mg/dL"
-#     }
-
-# @app.post("/api/predict/glucose")
-# async def predict_glucose(req: PredictionRequest):
-#     # 1. Lấy dữ liệu
-#     cursor = collection_glucose.find({"measure_type": req.measure_type})
-#     records = await cursor.to_list(length=100)
-    
-#     if len(records) < 3:
-#         return {
-#             "can_predict": False, 
-#             "message": "Cần ít nhất 3 lần đo trong lịch sử để dự báo!"
-#         }
-
-#     # 2. Xử lý dữ liệu với Pandas
-#     df = pd.DataFrame(records)
-#     # Xử lý format ngày tháng linh hoạt (mixed)
-#     df['date_obj'] = pd.to_datetime(df['created_at'], dayfirst=False, format='mixed')
-#     df = df.sort_values(by='date_obj')
-
-#     # Chuẩn hóa thời gian (Time scaling)
-#     df['timestamp'] = df['date_obj'].map(pd.Timestamp.timestamp)
-#     start_time = df['timestamp'].iloc[0] 
-#     df['days_passed'] = (df['timestamp'] - start_time) / (24 * 3600)
-    
-#     X = df[['days_passed']].values
-#     y = df['value'].values 
-
-#     # 3. Huấn luyện Linear Regression
-#     model = LinearRegression()
-#     model.fit(X, y)
-
-#     # 4. Vòng lặp dự báo 7 ngày tới
-#     future_predictions = []
-#     current_time = datetime.now()
-#     last_real_val = df['value'].iloc[-1] # Lấy giá trị thật cuối cùng để tham chiếu
-
-#     for i in range(1, 8): # Chạy từ 1 đến 7
-#         next_date = current_time + timedelta(days=i)
-#         next_days_passed = (next_date.timestamp() - start_time) / (24 * 3600)
+#     for i in range(1, 8): # Chạy từ ngày mai (1) đến 7 ngày sau (8)
+#         future_date = current_date + timedelta(days=i)
+#         future_ts = future_date.timestamp()
         
-#         pred = model.predict([[next_days_passed]])
-#         val = int(pred[0])
+#         # Chuẩn hóa thời gian tương lai theo mốc start_time cũ
+#         future_days_passed = (future_ts - start_time) / (24 * 3600)
+        
+#         # Dự đoán
+#         pred_val = model.predict([[future_days_passed]])[0]
+#         result = int(pred_val)
 
-#         # --- Logic chặn số âm / số ảo ---
-#         if val < 50:
-#             # Nếu dự báo tụt quá sâu, giữ bằng giá trị cuối cùng hoặc mức tối thiểu 70
-#             val = max(int(last_real_val), 70) 
-#         if val > 600:
-#             val = 600
-            
-#         # future_predictions.append({
-#         #     "date": next_date.strftime("%d/%m"), # Chỉ lấy Ngày/Tháng (VD: 05/12)
-#         #     "value": val
-#         # })
+#         # --- LOGIC CHẶN SỐ (Logic cũ của bé nhưng áp dụng trong vòng lặp) ---
+#         if result < 50:
+#             # Nếu giảm quá sâu, giả định nó đi ngang bằng giá trị cuối cùng
+#             result = int(last_real_value) 
+#         elif result > 600:
+#             result = 600
+        
+#         predictions.append({
+#             "date": future_date.strftime("%d/%m"), # Format ngày tháng cho đẹp (VD: 05/12)
+#             "value": result
+#         })
+        
+#         # Cập nhật giá trị tham chiếu cho vòng lặp sau (để đường dây mượt hơn nếu cần)
+#         # last_real_value = result 
 
 #     return {
 #         "can_predict": True,
-#         "predictions": future_predictions,
-#         "message": f"Dự báo xu hướng cho 7 ngày tới (từ {future_predictions[0]['date']} đến {future_predictions[-1]['date']})"
-#     }
-
-# @app.post("/api/predict/glucose")
-
-# async def predict_glucose(req: PredictionRequest):
-
-#     # 1. Lấy dữ liệu từ MongoDB (Lấy hết lịch sử của loại đo đó)
-
-#     cursor = collection_glucose.find({"measure_type": req.measure_type})
-
-#     records = await cursor.to_list(length=100)
-
-   
-
-#     # Nếu dữ liệu quá ít (dưới 3 lần đo) thì không dự báo được
-
-#     if len(records) < 3:
-
-#         return {
-
-#             "can_predict": False,
-
-#             "message": "Cần ít nhất 3 lần đo trong lịch sử để dự báo!"
-
-#         }
-
-
-
-# # 2. Xử lý dữ liệu
-
-#     df = pd.DataFrame(records)
-
-   
-
-#     # Chuyển đổi ngày tháng
-
-#     df['date_obj'] = pd.to_datetime(df['created_at'], dayfirst=True, format='mixed')
-
-   
-
-#     # ⚠️ QUAN TRỌNG: Sắp xếp dữ liệu theo thời gian (Cũ trước -> Mới sau)
-
-#     df = df.sort_values(by='date_obj')
-
-
-
-#     # Chuyển thành Timestamp
-
-#     df['timestamp'] = df['date_obj'].map(pd.Timestamp.timestamp)
-
-   
-
-#     # --- BƯỚC CHUẨN HÓA DỮ LIỆU ---
-
-#     # Lấy mốc thời gian đầu tiên làm gốc (Ngày thứ 0)
-
-#     start_time = df['timestamp'].iloc[0]
-
-   
-
-#     # Tính số ngày trôi qua (Ngày 0, 0.5, 1, 2...)
-
-#     df['days_passed'] = (df['timestamp'] - start_time) / (24 * 3600)
-
-   
-
-#     X = df[['days_passed']].values
-
-#     y = df['value'].values
-
-
-
-#     # 3. Huấn luyện mô hình
-
-#     model = LinearRegression()
-
-#     model.fit(X, y)
-
-
-
-#     # 4. Dự báo cho ngày mai
-
-#     tomorrow_timestamp = datetime.now().timestamp() + (24 * 60 * 60)
-
-   
-
-#     # Chuẩn hóa ngày mai theo mốc bắt đầu luôn
-
-#     tomorrow_days_passed = (tomorrow_timestamp - start_time) / (24 * 3600)
-
-   
-
-#     predicted_value = model.predict([[tomorrow_days_passed]])
-
-#     result = int(predicted_value[0])
-
-
-
-#     # --- 5. LOGIC CHẶN SỐ ÂM (QUAN TRỌNG) ---
-
-#     # Nếu kết quả ra Âm hoặc quá thấp (< 50), chứng tỏ xu hướng giảm quá mạnh
-
-#     # Ta sẽ lấy trung bình của 3 lần đo gần nhất thay thế, hoặc gán bằng 70 (mức tối thiểu an toàn)
-
-#     if result < 50:
-
-#         # Cách xử lý thông minh: Nếu dự báo âm, ta giả định đường huyết sẽ giữ ổn định như lần đo cuối
-
-#         result = int(df['value'].iloc[-1])
-
-   
-
-#     # Nếu cao quá mức sống (trên 600) thì chặn lại
-
-#     if result > 600:
-
-#         result = 180
-
-   
-
-#     # Làm tròn kết quả
-
-#     # result = int(predicted_value[0])
-
-
-
-#     return {
-
-#         "can_predict": True,
-
-#         "predicted_value": result,
-
-#         "message": f"Dựa trên xu hướng cũ, dự báo đường huyết ngày mai khoảng {result} mg/dL"}
-
-from datetime import datetime, timedelta
-import pandas as pd
-import numpy as np
-from sklearn.linear_model import LinearRegression
-
-# ... (Các phần import và setup giữ nguyên)
+#         "predictions": predictions, # Trả về cả danh sách 7 ngày
+#         "message": f"Đã dự báo xu hướng cho 7 ngày tới."}
 
 @app.post("/api/predict/glucose")
 async def predict_glucose(req: PredictionRequest):
-    # 1. Lấy dữ liệu (Giữ nguyên code cũ của bé)
-    cursor = collection_glucose.find({"measure_type": req.measure_type})
-    records = await cursor.to_list(length=100)
+    # 1. Lấy lịch sử từ hồ sơ bệnh nhân
+    patient = await collection.find_one(
+        {"patient_info.id": req.patient_id}, 
+        {"glucose_history": 1, "_id": 0}
+    )
     
+    # Nếu chưa có dữ liệu gì hết
+    if not patient or "glucose_history" not in patient:
+         return {"can_predict": False, "message": "Chưa có dữ liệu lịch sử để dự báo!"}
+
+    all_records = patient["glucose_history"]
+
+    # 2. Lọc ra các lần đo đúng loại yêu cầu (VD: chỉ lấy 'fasting')
+    # Vì trong glucose_history chứa lộn xộn cả đói cả no
+    records = [r for r in all_records if r.get("measure_type") == req.measure_type]
+    
+    # 3. Kiểm tra đủ dữ liệu (ít nhất 3 điểm)
     if len(records) < 3:
         return {
             "can_predict": False, 
-            "message": "Cần ít nhất 3 lần đo trong lịch sử để dự báo!"
+            "message": f"Cần ít nhất 3 lần đo '{req.measure_type}' để dự báo!"
         }
 
-    # 2. Xử lý dữ liệu (Giữ nguyên logic chuẩn hóa thời gian của bé)
+    # --- ĐOẠN DƯỚI NÀY GIỮ NGUYÊN CODE CŨ CỦA BÉ ---
     df = pd.DataFrame(records)
     df['date_obj'] = pd.to_datetime(df['created_at'], dayfirst=True, format='mixed')
     df = df.sort_values(by='date_obj')
 
-    # Mốc thời gian bắt đầu
     start_time = df['date_obj'].iloc[0].timestamp()
-    
-    # Tính X (đầu vào) và y (kết quả)
     df['timestamp'] = df['date_obj'].map(pd.Timestamp.timestamp)
     df['days_passed'] = (df['timestamp'] - start_time) / (24 * 3600)
     
     X = df[['days_passed']].values
     y = df['value'].values 
 
-    # 3. Huấn luyện mô hình
     model = LinearRegression()
     model.fit(X, y)
 
-    # --- 4. DỰ BÁO 7 NGÀY (PHẦN MỚI SỬA) ---
     predictions = []
     current_date = datetime.now()
-    last_real_value = df['value'].iloc[-1] # Lấy giá trị thật cuối cùng để tham chiếu
+    last_real_value = df['value'].iloc[-1]
 
-    for i in range(1, 8): # Chạy từ ngày mai (1) đến 7 ngày sau (8)
+    for i in range(1, 8):
         future_date = current_date + timedelta(days=i)
         future_ts = future_date.timestamp()
-        
-        # Chuẩn hóa thời gian tương lai theo mốc start_time cũ
         future_days_passed = (future_ts - start_time) / (24 * 3600)
         
-        # Dự đoán
         pred_val = model.predict([[future_days_passed]])[0]
         result = int(pred_val)
 
-        # --- LOGIC CHẶN SỐ (Logic cũ của bé nhưng áp dụng trong vòng lặp) ---
         if result < 50:
-            # Nếu giảm quá sâu, giả định nó đi ngang bằng giá trị cuối cùng
             result = int(last_real_value) 
         elif result > 600:
             result = 600
         
         predictions.append({
-            "date": future_date.strftime("%d/%m"), # Format ngày tháng cho đẹp (VD: 05/12)
+            "date": future_date.strftime("%d/%m"),
             "value": result
         })
-        
-        # Cập nhật giá trị tham chiếu cho vòng lặp sau (để đường dây mượt hơn nếu cần)
-        # last_real_value = result 
 
     return {
         "can_predict": True,
-        "predictions": predictions, # Trả về cả danh sách 7 ngày
-        "message": f"Đã dự báo xu hướng cho 7 ngày tới."
+        "predictions": predictions,
+        "message": "Đã dự báo xu hướng cho 7 ngày tới."
     }
-def start():
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
 
-# Nếu chạy local
+# ---------------------------------------------------------
+# API: TÌM BỆNH NHÂN THEO MÃ HỒ SƠ (Dùng cho Login)
+# ---------------------------------------------------------
+def patient_helper(patient) -> dict:
+    return {
+        "id": str(patient["_id"]), # Chuyển ObjectId thành chuỗi
+        "patient_info": patient.get("patient_info"),
+        "blood_tests": patient.get("blood_tests"),
+        "units": patient.get("units"),
+    }
+@app.get("/api/patients/{patient_id}")
+async def get_patient_by_id(patient_id: str):
+    # LƯU Ý QUAN TRỌNG:
+    # Vì id nằm trong patient_info, nên query phải là "patient_info.id"
+    patient = await collection.find_one({"patient_info.id": patient_id})
+    
+    if patient:
+        return patient_helper(patient)
+    
+    # Nếu không tìm thấy
+    raise HTTPException(status_code=404, detail="Không tìm thấy mã hồ sơ này")
+
+# --- API LẤY LỊCH SỬ ĐƯỜNG HUYẾT CHO BÁC SĨ ---
+# API này giúp bác sĩ xem biểu đồ đường huyết của bệnh nhân trong trang Chi tiết hồ sơ
+@app.get("/api/glucose/history/{patient_id}")
+async def get_glucose_history_by_id(patient_id: str):
+    # Tìm bệnh nhân theo mã hồ sơ
+    patient = await collection.find_one(
+        {"patient_info.id": patient_id}, 
+        {"glucose_history": 1, "_id": 0}
+    )
+
+    # Nếu không tìm thấy hoặc chưa có lịch sử
+    if not patient or "glucose_history" not in patient:
+        return {"status": "success", "data": []}
+
+    # Lấy dữ liệu và sắp xếp theo ngày tăng dần để vẽ biểu đồ cho đẹp
+    history = patient["glucose_history"]
+    
+    # Sắp xếp theo thời gian (Cũ -> Mới)
+    # Lưu ý: Cần đảm bảo created_at lưu đúng format để sort được, hoặc sort ở frontend cũng được
+    # Ở đây mình trả về nguyên danh sách, frontend sẽ lo phần hiển thị
+    return {"status": "success", "data": history}
+    
 if __name__ == "__main__":
-    start()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
