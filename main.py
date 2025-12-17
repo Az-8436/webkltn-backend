@@ -217,6 +217,45 @@ async def predict(data: PredictionInput):
 
         pre_h = np.argmax(A3_h, 0)
 
+        # risk_points = 0
+        # if tests.cholesterol < 5.2:
+        #     risk_points += 0
+        # elif 5.2 <= tests.cholesterol < 6.2:
+        #     risk_points += 1
+        # else: # >= 6.2
+        #     risk_points += 2
+
+        # if tests.ldl < 3.4:
+        #     risk_points += 0
+        # elif 3.4 <= tests.ldl < 4.1:
+        #     risk_points += 1
+        # else: # >= 4.1
+        #     risk_points += 2
+        # # 4. Đánh giá HDL (Mỡ tốt - Càng cao càng tốt)
+        # if tests.hdl >= 1.0: # Ở nam >1.0, nữ >1.3 là tốt, lấy chung 1.0 làm mốc sàn
+        #     risk_points += 0
+        # else:
+        #     risk_points += 1 # HDL thấp là yếu tố nguy cơ
+        
+        # if tests.triglycerid < 1.7:
+        #     risk_points += 0
+
+        # elif 1.7 <= tests.triglycerid < 2.3:
+        #     risk_points += 1
+        # elif 2.3 <= tests.triglycerid < 5.6:
+        #     risk_points += 2
+        # else:
+        #     risk_points += 3
+
+        # if risk_points == 0:
+        #     status = "Bệnh nhân không bị mỡ máu"
+            
+        # elif 1 <= risk_points <= 2:
+        #     status= "Bệnh nhân có dấu hiệu rối loạn lipid máu nhẹ"
+        # else:
+        #     status = "Bệnh nhân bị rối loạn lipid máu"
+
+
         if pre_h[0] == 0:
             result_h = "Bệnh nhân không bị tăng huyết áp"
         elif pre_h[0] == 1:
@@ -226,7 +265,35 @@ async def predict(data: PredictionInput):
         elif pre_h[0] == 3:
             result_h = 'Bệnh nhân bị tăng huyết áp cấp độ 2'
 
-        combined_result = f"{result_d} và {result_h}"
+        data_for_model_lipid = np.array([[tests.cholesterol, tests.triglycerid, tests.hdl, tests.ldl]])
+        # return {"status": "success", "data": data_for_model.tolist}
+        scaler_lipid =  joblib.load('scaler_mo_mau.pkl')
+        normalized_data_lipid = scaler_lipid.transform(data_for_model_lipid).T
+        # return {"status": "success", "data": normalized_data.tolist()}
+
+        with open('weights_bias_mo_mau_with_stochastic_gradient_descent.pkl', 'rb') as f:
+            params_dia = pickle.load(f)
+
+    
+        W1_l = params_dia['W1']
+        b1_l = params_dia['b1']
+        W2_l = params_dia['W2']
+        b2_l = params_dia['b2']
+        W3_l = params_dia['W3']
+        b3_l = params_dia['b3']
+
+
+
+        _, _, _, _, _, A3_l = forward_prop(normalized_data_lipid, W1_l, b1_l, W2_l, b2_l, W3_l, b3_l)
+        pre_l = np.argmax(A3_l, 0)
+        if pre_l[0] == 0:
+            result_l = "Bệnh nhân không bị lipid máu"
+        elif pre_l[0] == 1: 
+            result_l = 'Bệnh nhân có dấu hiệu rối loạn lipid máu nhẹ'
+        elif pre_l[0] == 2:
+            result_l = 'Bệnh nhân bị rối loạn lipid máu'
+
+        combined_result = f"{result_d} và {result_h} và {result_l}"
         return {"status": "success", "data": combined_result}
     
 # @app.post('/predict/hypertension')
@@ -308,6 +375,7 @@ async def get_dashboard_stats():
     total_patients = 0
     diabetes_count = 0
     hypertension_count = 0
+    lipid_count = 0
     
     # Dùng dictionary để gom nhóm theo ngày cho biểu đồ
     # Cấu trúc: { "2025-11-24": { "date": "24/11", "diabetes": 1, "hypertension": 0 } }
@@ -323,6 +391,7 @@ async def get_dashboard_stats():
         # 2. Phân loại bệnh (Dựa vào chuỗi kết quả AI trả về)
         is_diabetes = "tiểu đường" in diagnosis or "tieu duong" in diagnosis
         is_hypertension = "huyết áp" in diagnosis or "huyet ap" in diagnosis
+        is_lipid = "lipid máu" in diagnosis or "lipid mau" in diagnosis
         
         # Logic đếm: Nếu chuỗi kết quả có chữ "không bị" thì không đếm là bệnh
         if "không bị tiểu đường" not in diagnosis and "tiền tiểu đường" not in diagnosis:
@@ -331,6 +400,11 @@ async def get_dashboard_stats():
         if "không bị tăng huyết áp" not in diagnosis and "tiền tăng huyết áp" not in diagnosis:
             if is_hypertension:
                 hypertension_count += 1
+
+        if "không bị lipid máu" not in diagnosis and "lipid máu nhẹ" not in diagnosis:
+            if is_lipid:
+                lipid_count += 1
+
 
         # if "Bệnh nhân bị tiểu đường không phụ thuộc insulin - type 2" in diagnosis:
         #     diabetes_count += 1
@@ -347,6 +421,7 @@ async def get_dashboard_stats():
                 "name": date_str, # Tên trục hoành
                 "diabetes": 0,
                 "hypertension": 0,
+                "lipid": 0,
                 "total": 0
             }
         
@@ -364,8 +439,9 @@ async def get_dashboard_stats():
         if "không bị tăng huyết áp" not in diagnosis and "tiền tăng huyết áp" not in diagnosis:
             if is_hypertension:
                 chart_data_dict[date_str]["hypertension"] += 1
-
-
+        if "không bị lipid máu" not in diagnosis and "lipid máu nhẹ" not in diagnosis:
+            if is_lipid:
+                chart_data_dict[date_str]["lipid"] += 1
     # 4. Chuyển dictionary thành list và sắp xếp theo ngày tăng dần
     chart_list = sorted(list(chart_data_dict.values()), key=lambda x: x['name'])
 
@@ -374,7 +450,8 @@ async def get_dashboard_stats():
         "summary": {
             "total": total_patients,
             "diabetes": diabetes_count,
-            "hypertension": hypertension_count
+            "hypertension": hypertension_count,
+            "lipid": lipid_count
         },
         "chart_data": chart_list
     }
